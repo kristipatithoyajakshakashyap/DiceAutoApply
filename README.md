@@ -4,9 +4,6 @@
 
 <p><strong>Apply to 300 Dice.com jobs per day — automatically, while you sleep.</strong></p>
 
-<img src="https://img.shields.io/badge/version-2.0-2dd4bf?style=flat-square&labelColor=0d1117"/>
-<img src="https://img.shields.io/github/stars/trinathone/rezloft?style=flat-square&color=2dd4bf&labelColor=0d1117"/>
-<img src="https://img.shields.io/badge/license-GPL--v3-2dd4bf?style=flat-square&labelColor=0d1117"/>
 <img src="https://img.shields.io/badge/platform-Python%203.10%2B-2dd4bf?style=flat-square&labelColor=0d1117"/>
 <img src="https://img.shields.io/badge/CAPTCHAs_triggered-0-2dd4bf?style=flat-square&labelColor=0d1117"/>
 
