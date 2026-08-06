@@ -1,0 +1,11 @@
+.env
+browser_data/
+screenshots/
+*.log
+applications.csv
+__pycache__/
+*.pyc
+.venv/
+venv/
+.claude/
+keywords.txt
