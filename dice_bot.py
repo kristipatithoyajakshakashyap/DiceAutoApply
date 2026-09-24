@@ -11,9 +11,10 @@ Dice.com Auto-Apply Bot — Production v2
 
 import asyncio
 import random
+import shutil
 from datetime import datetime, timedelta
 
-from playwright.async_api import async_playwright, Page, BrowserContext
+from patchright.async_api import async_playwright, Page, BrowserContext
 
 import config as cfg
 from utils import (
@@ -29,12 +30,14 @@ class DiceBot:
         self.tracker   = ApplicationTracker()
         self.page: Page = None
         self.context: BrowserContext = None
+        self.browser = None  # only set in incognito mode (non-persistent)
         self.consecutive_fails = 0
         self.used_urls  = set()
         self.batch_applied = 0
         self.batch_target  = random.randint(*cfg.BATCH_SIZE)
         self.keywords: list = []
         self.query_index: int = 0
+        self._last_search_url: str = ""
 
     # ── Entry Point ──────────────────────────────────────────
     async def run(self):
@@ -53,6 +56,17 @@ class DiceBot:
         self.used_urls = self.tracker.get_all_applied_urls()
         logger.info(f"Loaded {len(self.used_urls)} previously applied URLs")
 
+        if cfg.INCOGNITO:
+            # True incognito already gets a blank in-memory profile every
+            # run — no on-disk profile to wipe here.
+            pass
+        elif cfg.RESET_COOKIES_ON_START:
+            # Opt-in only: a brand-new, history-less profile is itself
+            # what triggered Dice's "Something went wrong" crash on
+            # every single /jobs load in testing — a returning-looking
+            # session (real cookies/consent/history) loads fine.
+            shutil.rmtree(cfg.BROWSER_PROFILE_DIR, ignore_errors=True)
+            logger.info("Cleared browser profile — starting fresh session (no cookies)")
         cfg.BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
 
         consecutive_crashes = 0
@@ -87,12 +101,10 @@ class DiceBot:
                 "--no-default-browser-check",
                 f"--window-size={viewport['width']},{viewport['height']}",
             ]
+            if cfg.INCOGNITO:
+                launch_args.append("--incognito")
 
-            launch_kwargs = dict(
-                user_data_dir=cfg.BROWSER_PROFILE_DIR,
-                headless=cfg.HEADLESS,
-                args=launch_args,
-                slow_mo=random.randint(15, 40),
+            context_kwargs = dict(
                 viewport=viewport,
                 user_agent=ua,
                 locale="en-US",
@@ -100,10 +112,38 @@ class DiceBot:
                 color_scheme=random.choice(["light", "dark", "no-preference"]),
             )
 
-            if cfg.PROXY:
-                launch_kwargs["proxy"] = {"server": cfg.PROXY}
+            proxy_kwargs = {"proxy": {"server": cfg.PROXY}} if cfg.PROXY else {}
 
-            self.context = await p.chromium.launch_persistent_context(**launch_kwargs)
+            # Which browser binary to drive — Chromium's own build,
+            # system Chrome (channel="chrome"), or Brave (via its exe).
+            browser_kwargs = {}
+            if cfg.BROWSER == "chrome":
+                browser_kwargs["channel"] = "chrome"
+            elif cfg.BROWSER == "brave":
+                browser_kwargs["executable_path"] = cfg.BRAVE_PATH
+
+            if cfg.INCOGNITO:
+                # No user_data_dir at all — nothing written to disk, every
+                # run starts with an empty in-memory profile (no cookies).
+                self.browser = await p.chromium.launch(
+                    headless=cfg.HEADLESS,
+                    args=launch_args,
+                    slow_mo=random.randint(15, 40),
+                    **browser_kwargs,
+                    **proxy_kwargs,
+                )
+                self.context = await self.browser.new_context(**context_kwargs)
+            else:
+                self.browser = None
+                self.context = await p.chromium.launch_persistent_context(
+                    user_data_dir=cfg.BROWSER_PROFILE_DIR,
+                    headless=cfg.HEADLESS,
+                    args=launch_args,
+                    slow_mo=random.randint(15, 40),
+                    **context_kwargs,
+                    **browser_kwargs,
+                    **proxy_kwargs,
+                )
             await self.context.add_init_script(STEALTH_JS)
 
             self.page = (
@@ -133,6 +173,11 @@ class DiceBot:
                     await self.context.close()
                 except Exception:
                     pass
+                if self.browser:
+                    try:
+                        await self.browser.close()
+                    except Exception:
+                        pass
                 # Minimum cooldown before any browser restart attempt.
                 # Prevents rapid-fire relaunch cycles on network dropout
                 # (ERR_INTERNET_DISCONNECTED exits _run_session cleanly,
@@ -321,25 +366,57 @@ class DiceBot:
             page_num += 1
 
     # ── Search ────────────────────────────────────────────────
+    SEARCH_INPUT_SELECTORS = [
+        "#typeaheadInput",
+        'input[name="q"]',
+        'input[data-testid="search-input"]',
+        'input[placeholder*="Job title" i]',
+        'input[aria-label*="search" i]',
+    ]
+    SEARCH_SUBMIT_SELECTORS = [
+        "#submitSearch-mainSearchForm",
+        'button[data-testid="search-submit"]',
+        'button[type="submit"]:has-text("Search")',
+        'button[aria-label*="search" i]',
+    ]
+
     async def _run_search(self, keyword: str, page: int = 1):
+        """Load the results URL with `q=` included (Dice's results page
+        500s without it — confirmed by testing: dropping q from the URL
+        made the "Something went wrong" page fire on every single load,
+        instantly, before hydration — a server error, not a client
+        fingerprint issue), then also type the same keyword into the
+        visible search box and click Search. That second step is purely
+        cosmetic/confirmatory — it's what lets you watch what's being
+        searched — but the URL's own `q=` is what actually has to be
+        correct for the page to render."""
         params = f"?q={keyword.replace(' ', '+')}"
         if cfg.JOB_LOCATION:
             params += f"&location={cfg.JOB_LOCATION.replace(' ', '+')}"
 
-        # Workplace type — repeat param once per selected type; [] = no filter (open to any)
+        # Workplace type — repeat param once per selected type, but only
+        # when it's a real subset. Sending all 3 values as duplicate
+        # params (what a real user filtering by hand would never do —
+        # they'd just leave the filter alone) is the same as "no
+        # filter" and was confirmed by testing to make Dice's own
+        # results page 500 instantly on every load.
         workplace_map = {"onsite": "On-Site", "hybrid": "Hybrid", "remote": "Remote"}
-        for wt in cfg.WORKPLACE_TYPES:
-            value = workplace_map.get(wt)
-            if value:
-                params += f"&filters.workplaceTypes={value.replace(' ', '+')}"
+        if 0 < len(cfg.WORKPLACE_TYPES) < len(workplace_map):
+            for wt in cfg.WORKPLACE_TYPES:
+                value = workplace_map.get(wt)
+                if value:
+                    params += f"&filters.workplaceTypes={value.replace(' ', '+')}"
 
         # Employment type — Dice's employmentType facet only knows
         # FULLTIME / CONTRACTS (no W2 vs C2C distinction server-side).
         # W2/C2C subtype gating happens per-job in _apply_to_job() by
-        # reading the job detail page text.
-        if any(jt.startswith("contract") for jt in cfg.JOB_TYPES):
+        # reading the job detail page text. Same rule as above: only
+        # send the filter when it actually narrows something.
+        wants_contract = any(jt.startswith("contract") for jt in cfg.JOB_TYPES)
+        wants_fulltime = "fulltime" in cfg.JOB_TYPES
+        if wants_contract and not wants_fulltime:
             params += "&filters.employmentType=CONTRACTS"
-        if "fulltime" in cfg.JOB_TYPES:
+        elif wants_fulltime and not wants_contract:
             params += "&filters.employmentType=FULLTIME"
 
         if cfg.EASY_APPLY_ONLY:
@@ -347,6 +424,7 @@ class DiceBot:
         params += f"&page={page}"
 
         url = f"https://www.dice.com/jobs{params}"
+        self._last_search_url = url
         logger.info(f"Loading search: {keyword} (page {page})")
 
         try:
@@ -355,6 +433,58 @@ class DiceBot:
             # Fallback — just wait for network to settle a bit
             await asyncio.sleep(3)
 
+        await self._recover_from_app_error()
+        await short_delay()
+
+        # Now type the keyword into the search box and click Search —
+        # visible on screen, same as a human searching.
+        search_box = None
+        for sel in self.SEARCH_INPUT_SELECTORS:
+            loc = self.page.locator(sel).first
+            try:
+                if await loc.is_visible(timeout=1_500):
+                    search_box = loc
+                    break
+            except Exception:
+                continue
+
+        if search_box:
+            logger.info(f"Typing search query: '{keyword}'")
+            try:
+                await search_box.click()
+                await search_box.fill("")
+                await human_type(search_box, keyword)
+                await micro_delay()
+
+                clicked = False
+                for sel in self.SEARCH_SUBMIT_SELECTORS:
+                    btn = self.page.locator(sel).first
+                    try:
+                        if await btn.is_visible(timeout=1_000):
+                            box = await btn.bounding_box()
+                            if box:
+                                await bezier_mouse_move(
+                                    self.page,
+                                    int(box["x"] + box["width"] / 2),
+                                    int(box["y"] + box["height"] / 2),
+                                )
+                            await micro_delay()
+                            await btn.click()
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+
+                if not clicked:
+                    await search_box.press("Enter")
+
+                await self.page.wait_for_load_state("domcontentloaded", timeout=15_000)
+            except Exception as e:
+                logger.warning(f"Search box interaction failed, query stays as-is: {e}")
+        else:
+            logger.warning("Search box not found — showing unfiltered/prior results")
+
+        await self._recover_from_app_error()
         await short_delay()
         await scroll_to_read(self.page)
 
@@ -421,13 +551,40 @@ class DiceBot:
 
             logger.info(f"Applying: {job['title']}")
 
+            # Click the job's own link on the listing page instead of
+            # jumping straight to its URL — visible, human-shaped
+            # navigation. Falls back to goto() if the listing isn't the
+            # current page (or the link isn't there any more).
+            link = self.page.locator(
+                f'a[data-testid="job-search-job-detail-link"][href="{job["url"]}"]'
+            ).first
+            clicked_link = False
             try:
-                await self.page.goto(
-                    job["url"], wait_until="domcontentloaded", timeout=45_000
-                )
+                if await link.is_visible(timeout=2_000):
+                    await link.scroll_into_view_if_needed(timeout=2_000)
+                    box = await link.bounding_box()
+                    if box:
+                        await bezier_mouse_move(
+                            self.page,
+                            int(box["x"] + box["width"] / 2 + random.randint(-5, 5)),
+                            int(box["y"] + box["height"] / 2 + random.randint(-3, 3)),
+                        )
+                    await micro_delay()
+                    await link.click()
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=45_000)
+                    clicked_link = True
             except Exception:
-                await asyncio.sleep(2)
+                clicked_link = False
 
+            if not clicked_link:
+                try:
+                    await self.page.goto(
+                        job["url"], wait_until="domcontentloaded", timeout=45_000
+                    )
+                except Exception:
+                    await asyncio.sleep(2)
+
+            await self._recover_from_app_error()
             await short_delay()
             await scroll_to_read(self.page)
 
@@ -543,6 +700,28 @@ class DiceBot:
                 job["title"], job["company"], job["location"],
                 job["url"], "failed", str(e)[:200]
             )
+
+        finally:
+            # Back to the listing so the next job's link click has
+            # something to find. go_back() first (cheapest, visible,
+            # matches a human hitting the browser back button); if that
+            # doesn't land back on a job list, re-run the last search.
+            try:
+                await self.page.go_back(wait_until="domcontentloaded", timeout=15_000)
+                await self.page.wait_for_selector(
+                    'a[data-testid="job-search-job-detail-link"]', timeout=5_000
+                )
+            except Exception:
+                if self._last_search_url:
+                    try:
+                        await self.page.goto(
+                            self._last_search_url,
+                            wait_until="domcontentloaded",
+                            timeout=45_000,
+                        )
+                        await self._recover_from_app_error()
+                    except Exception:
+                        pass
 
     # ── Form Handler ──────────────────────────────────────────
     SUBMIT_SELECTORS = [
@@ -811,6 +990,39 @@ class DiceBot:
                 logger.info("Submitted (final fallback).")
                 return True
 
+        return False
+
+    # ── App Error Recovery ──────────────────────────────────────
+    async def _recover_from_app_error(self) -> bool:
+        """Detect Dice's Next.js error-boundary page ('Something went
+        wrong' / Digest ID) and reload once to clear it.
+
+        Returns True if the error page was hit (whether or not the
+        reload recovered it) so callers can back off / retry.
+        """
+        try:
+            body = await self.page.evaluate(
+                "() => document.body?.innerText?.toLowerCase() || ''"
+            )
+        except Exception:
+            return False
+
+        if "something went wrong" in body and "digest id" in body:
+            logger.warning("Dice app error page hit — reloading")
+            try:
+                snippet = body[:600].replace("\n", " | ")
+                logger.warning(
+                    f"DIAGNOSTIC url={self.page.url} status_snippet='{snippet}'"
+                )
+                await self.page.screenshot(path="error_diagnostic.png")
+            except Exception:
+                pass
+            try:
+                await self.page.reload(wait_until="domcontentloaded", timeout=45_000)
+                await short_delay()
+            except Exception as e:
+                logger.warning(f"Reload after app error failed: {e}")
+            return True
         return False
 
     # ── Block Detection ───────────────────────────────────────

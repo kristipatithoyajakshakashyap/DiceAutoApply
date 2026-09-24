@@ -262,7 +262,7 @@ STEALTH_JS = """
     });
 
     Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-    Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
+    Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
 
     const originalQuery = window.navigator.permissions.query;
     window.navigator.permissions.query = (parameters) =>
@@ -270,27 +270,13 @@ STEALTH_JS = """
             ? Promise.resolve({ state: Notification.permission })
             : originalQuery(parameters);
 
-    const getParameter = WebGLRenderingContext.prototype.getParameter;
-    WebGLRenderingContext.prototype.getParameter = function(param) {
-        if (param === 37445) return 'Intel Inc.';
-        if (param === 37446) return 'Intel Iris OpenGL Engine';
-        return getParameter.call(this, param);
-    };
-
-    const toDataURL = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = function(type) {
-        if (type === 'image/png') {
-            const ctx = this.getContext('2d');
-            if (ctx) {
-                const imageData = ctx.getImageData(0, 0, this.width, this.height);
-                for (let i = 0; i < imageData.data.length; i += 4) {
-                    imageData.data[i] += (Math.random() * 2 - 1) | 0;
-                }
-                ctx.putImageData(imageData, 0, 0);
-            }
-        }
-        return toDataURL.apply(this, arguments);
-    };
+    // NOTE: no WebGL vendor override, no canvas pixel mutation here.
+    // Those used to fake a Mac GPU / corrupt canvas readback on a real
+    // Windows Chrome/Brave process — a mismatch against the real
+    // Sec-CH-UA-Platform headers and a corrupted fingerprint hash,
+    // which is what was tripping Dice's server-side fraud check and
+    // producing the "Something went wrong" crash page. Leave real
+    // browsers' real fingerprints alone; only mask automation markers.
 
     for (let frame of window.frames) {
         try {
@@ -314,6 +300,10 @@ def random_viewport():
 
 
 def random_user_agent():
+    """Windows Chrome/Brave UA — must match the real OS (client-hint
+    headers like Sec-CH-UA-Platform leak the true OS regardless of this
+    string, so a Mac UA on a real Windows browser is an identity
+    mismatch a fraud check can flag and crash on)."""
     versions = [
         "130.0.6723.116", "131.0.6778.139", "132.0.6834.83",
         "133.0.6943.141", "134.0.6998.165", "135.0.7049.84",
@@ -321,7 +311,7 @@ def random_user_agent():
     ]
     v = random.choice(versions)
     return (
-        f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         f"AppleWebKit/537.36 (KHTML, like Gecko) "
         f"Chrome/{v} Safari/537.36"
     )

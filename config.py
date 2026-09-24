@@ -45,7 +45,7 @@ def load_keywords() -> list:
 # ── Filters ───────────────────────────────────────────────────
 EASY_APPLY_ONLY = True
 JOB_TYPES       = ['contract_c2c']
-WORKPLACE_TYPES = []
+WORKPLACE_TYPES = ['onsite', 'hybrid', 'remote']
 JOB_LOCATION    = ""             # no location filter — widest net
 
 # ── EEO / Screening Question Answers ────────────────────────────
@@ -53,7 +53,7 @@ JOB_LOCATION    = ""             # no location filter — widest net
 # up in some Easy Apply forms (onsite interview, veteran, disability,
 # race/ethnicity). "yes"/"no" for the boolean ones; free text for race.
 EEO_ANSWERS = {
-    "onsite_interview": 'yes',
+    "onsite_interview": 'no',
     "veteran":          'no',
     "disability":       'no',
     "race":             'Asian',
@@ -67,8 +67,8 @@ TYPING_SPEED          = (40, 100)
 MAX_CONSECUTIVE_FAILS = 5
 BREAK_EVERY_N_APPS    = 10
 BREAK_DURATION        = (20, 40)
-BATCH_SIZE            = (20, 30)
-BATCH_BREAK_MINUTES   = (6, 10)
+BATCH_SIZE            = (60, 80)
+BATCH_BREAK_MINUTES   = (3, 5)
 
 # ── Sleep Schedule ───────────────────────────────────────────
 SLEEP_HOUR_START = 2   # 2am
@@ -76,8 +76,15 @@ SLEEP_HOUR_END   = 3   # 3am — only 1 hour break
 
 # ── Browser ──────────────────────────────────────────────────
 BROWSER_PROFILE_DIR = Path(__file__).parent / "browser_data"
-HEADLESS            = False
-PROXY               = os.getenv("PROXY", "")
+HEADLESS             = False
+PROXY                = os.getenv("PROXY", "")
+INCOGNITO            = os.getenv("INCOGNITO", "false").lower() == "true"
+RESET_COOKIES_ON_START = os.getenv("RESET_COOKIES_ON_START", "false").lower() == "true"
+BROWSER              = os.getenv("BROWSER", "chromium").lower()  # chromium | chrome | brave
+BRAVE_PATH           = os.getenv(
+    "BRAVE_PATH",
+    r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+)
 
 # ── Logging ──────────────────────────────────────────────────
 LOG_FILE = Path(__file__).parent / "dice_bot.log"
